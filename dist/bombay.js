@@ -176,6 +176,7 @@
             key: n[0]
         };
     };
+    var isInIframe = self != top;
     //# sourceMappingURL=tools.js.map
 
     // 默认参数
@@ -187,7 +188,9 @@
             errcount: 0,
             apisucc: 0,
             apifail: 0
-        }
+        },
+        circle: false,
+        cssInserted: false,
     };
     function setGlobalPage(page) {
         GlobalVal.page = page;
@@ -229,7 +232,8 @@
             vp: getScreen(),
             ct: u ? u.effectiveType : '',
             ul: getLang(),
-            _v: '1.0.5',
+            _v: '1.0.8',
+            o: location.href,
         };
         return data;
     }
@@ -286,10 +290,13 @@
     }
     // post上报
     function send(msg) {
+        var _a;
         var body = msg[msg.t];
         delete msg[msg.t];
         var url = Config.reportUrl + "?" + serialize(msg);
-        post(url, body);
+        post(url, (_a = {},
+            _a[msg.t] = body,
+            _a));
         // new Image().src = `${Config.reportUrl}?${serialize(msg)}`
     }
     function post(url, body) {
@@ -312,12 +319,15 @@
     // 健康检查上报
     function sendBeacon(e) {
         "object" == typeof e && (e = serialize(e));
+        e = Config.reportUrl + "?" + e;
         window && window.navigator && "function" == typeof window.navigator.sendBeacon
-            ? window.navigator.sendBeacon(Config.reportUrl, e)
+            ? window.navigator.sendBeacon(e)
             : warn("[arms] navigator.sendBeacon not surported");
     }
     //# sourceMappingURL=reporter.js.map
 
+    var CIRCLECLS = 'bombayjs-circle-active'; // circle class类名
+    var CIRCLESTYLEID = 'bombayjs-circle-css'; // 插入的style标签id
     // 处理pv
     function handlePv() {
         if (!Config.autoSendPv)
@@ -347,7 +357,38 @@
             r = s[i], (a = e.getAttribute(r)) && o.push("[".concat(r, '="').concat(a, '"]'));
         return o.join("");
     };
+    // 获取元素路径，最多保留5层
+    var getElmPath = function (e) {
+        if (!e || 1 !== e.nodeType)
+            return "";
+        var ret = [], deepLength = 0, // 层数，最多5层
+        elm = ''; // 元素
+        for (var t = e || null; t && deepLength++ < 5 && !("html" === (elm = normalTarget(t)));) {
+            ret.push(elm), t = t.parentNode;
+        }
+        return ret.reverse().join(" > ");
+    };
     function handleClick(event) {
+        // 正在圈选
+        if (GlobalVal.circle) {
+            var target_1 = event.target;
+            var clsArray = target_1.className.split(/\s+/);
+            var path = getElmPath(event.target);
+            // clsArray 为 ['bombayjs-circle-active] 或 ['', 'bombayjs-circle-active]时
+            if (clsArray.length === 1 || (clsArray.length === 2 && clsArray[0] === '')) {
+                path = path.replace(/\.\.bombayjs-circle-active/, '');
+            }
+            else {
+                path = path.replace(/\.bombayjs-circle-active/, '');
+            }
+            window.parent.postMessage({
+                t: 'setElmPath',
+                path: path,
+                page: GlobalVal.page,
+            }, '*');
+            event.stopPropagation();
+            return;
+        }
         var target;
         try {
             target = event.target;
@@ -355,21 +396,47 @@
         catch (u) {
             target = "<unknown>";
         }
+        if (target.nodeName === 'INPUT' || target.nodeName === 'TEXTAREA')
+            return;
         if (0 !== target.length) {
             var behavior = {
                 type: 'ui.click',
                 data: {
-                    message: function (e) {
-                        if (!e || 1 !== e.nodeType)
-                            return "";
-                        for (var t = e || null, n = [], r = 0, a = 0, i = " > ".length, o = ""; t && r++ < 5 && !("html" === (o = normalTarget(t)) || r > 1 && a + n.length * i + o.length >= 80);)
-                            n.push(o), a += o.length, t = t.parentNode;
-                        return n.reverse().join(" > ");
-                    }(target),
+                    path: getElmPath(target),
+                    message: '',
                 }
             };
             // 空信息不上报
-            if (!behavior.data.message)
+            if (!behavior.data.path)
+                return;
+            var commonMsg = getCommonMsg();
+            var msg = __assign({}, commonMsg, {
+                t: 'behavior',
+                behavior: behavior,
+            });
+            report(msg);
+        }
+    }
+    function handleBlur(event) {
+        var target;
+        try {
+            target = event.target;
+        }
+        catch (u) {
+            target = "<unknown>";
+        }
+        if (target.nodeName !== 'INPUT' && target.nodeName !== 'TEXTAREA')
+            return;
+        if (0 !== target.length) {
+            var behavior = {
+                type: 'ui.blur',
+                data: {
+                    path: getElmPath(target),
+                    message: target.value
+                }
+            };
+            // 空信息不上报
+            if (!behavior.data.path || !behavior.data.message)
                 return;
             var commonMsg = getCommonMsg();
             var msg = __assign({}, commonMsg, {
@@ -449,9 +516,31 @@
         var page = Config.enableSPA ? parseHash(e.detail.toLowerCase()) : e.detail.toLowerCase();
         page && setPage(page, false);
     }
+    // 处理pv
+    function handleNavigation(page) {
+        var commonMsg = getCommonMsg();
+        var msg = __assign({}, commonMsg, {
+            t: 'behavior',
+            behavior: {
+                type: 'navigation',
+                data: {
+                    from: commonMsg.page,
+                    to: page,
+                },
+            }
+        });
+        report(msg);
+    }
     function setPage(page, isFirst) {
         !isFirst && handleHealth();
+        handleNavigation(page);
         setTimeout(function () {
+            if (isInIframe) {
+                window.parent.postMessage({
+                    t: 'setPage',
+                    page: location.href,
+                }, '*');
+            }
             setGlobalPage(page);
             setGlobalSid();
             handlePv();
@@ -514,7 +603,6 @@
     }
     // 捕获promise异常
     function reportPromiseError(error) {
-        console.log(error);
         var commonMsg = getCommonMsg();
         var msg = __assign({}, commonMsg, {
             t: 'error',
@@ -532,7 +620,7 @@
             dom: 0,
             load: 0,
             t: 'res',
-            res: '',
+            res: [],
         });
         var i = performance.timing || {}, o = performance.getEntriesByType("resource") || [];
         if ("function" == typeof window.PerformanceNavigationTiming) {
@@ -554,7 +642,7 @@
             var include = getConfig('ignore').ignoreApis.findIndex(function (ignoreApi) { return item.name.indexOf(ignoreApi) > -1; });
             return include > -1 ? false : true;
         });
-        msg.res = JSON.stringify(o);
+        msg.res = o;
         report(msg);
     }
     function handleApi(url, success, time, code, msg, beigin) {
@@ -623,6 +711,73 @@
     //   }
     //   report(ret)
     // }
+    function handleHover(e) {
+        var cls = document.getElementsByClassName(CIRCLECLS);
+        if (cls.length > 0) {
+            for (var i = 0; i < cls.length; i++) {
+                cls[i].className = cls[i].className.replace(/ bombayjs-circle-active/g, '');
+            }
+        }
+        e.target.className += " " + CIRCLECLS;
+    }
+    function insertCss() {
+        var content = "." + CIRCLECLS + "{border: #ff0000 2px solid;}";
+        var style = document.createElement("style");
+        style.type = "text/css";
+        style.id = CIRCLESTYLEID;
+        try {
+            style.appendChild(document.createTextNode(content));
+        }
+        catch (ex) {
+            style.styleSheet.cssText = content; //针对IE
+        }
+        var head = document.getElementsByTagName("head")[0];
+        head.appendChild(style);
+    }
+    function removeCss() {
+        var style = document.getElementById(CIRCLESTYLEID);
+        style.parentNode.removeChild(style);
+    }
+    function listenCircleListener() {
+        insertCss();
+        GlobalVal.cssInserted = true;
+        GlobalVal.circle = true;
+        on('mouseover', handleHover);
+    }
+    function removeCircleListener() {
+        removeCss();
+        GlobalVal.cssInserted = false;
+        GlobalVal.circle = false;
+        off('mouseover', handleHover);
+    }
+    function listenMessageListener() {
+        on('message', handleMessage);
+    }
+    /**
+     *
+     * @param {*} event {t: '', v: ''}
+     *  t: type
+     *  v: value
+     */
+    function handleMessage(event) {
+        // 防止其他message的干扰
+        if (!event.data || !event.data.t)
+            return;
+        if (event.data.t === 'setCircle') {
+            if (Boolean(event.data)) {
+                listenCircleListener();
+            }
+            else {
+                removeCircleListener();
+            }
+        }
+        else if (event.data.t === 'back') {
+            window.history.back();
+        }
+        else if (event.data.t === 'forward') {
+            window.history.forward();
+        }
+    }
 
     // hack console
     // "debug", "info", "warn", "log", "error"
@@ -789,6 +944,11 @@
             // 绑定全局变量
             window.__bb = this;
             this.addListenUnload();
+            // 监听message
+            listenMessageListener();
+            if (GlobalVal.circle) {
+                listenCircleListener();
+            }
         };
         Bombay.prototype.sendPerf = function () {
             handlePerf();
@@ -808,8 +968,8 @@
         };
         // 监听click
         Bombay.prototype.addListenClick = function () {
-            on('click', handleClick);
-            on('keypress', handleClick);
+            on('click', handleClick); // 非输入框点击，会过滤掉点击输入框
+            on('blur', handleBlur); // 输入框失焦
         };
         // 监听路由
         Bombay.prototype.addListenRouterChange = function () {

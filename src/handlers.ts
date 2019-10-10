@@ -1,9 +1,11 @@
 import { Config, getConfig, } from './config'
-import { queryString, serialize, each, parseHash, warn, splitGroup, } from './utils/tools'
+import { queryString, serialize, each, parseHash, warn, splitGroup,on,off, isInIframe, } from './utils/tools'
 import { getCommonMsg } from './utils/index'
 import { report } from './reporter'
 import { setGlobalPage, setGlobalSid, setGlobalHealth, GlobalVal, resetGlobalHealth,} from './config/global'
 
+const CIRCLECLS = 'bombayjs-circle-active' // circle class类名
+const CIRCLESTYLEID = 'bombayjs-circle-css' // 插入的style标签id
 // 处理pv
 export function handlePv(): void {
   if (!Config.autoSendPv) return
@@ -35,27 +37,87 @@ const normalTarget = function (e) {
   return o.join("")
 }
 
+// 获取元素路径，最多保留5层
+const getElmPath = function (e) {
+  if (!e || 1 !== e.nodeType) return "";
+  var ret = [],
+      deepLength = 0, // 层数，最多5层
+      elm = '' // 元素
+  for (var t = e || null; t && deepLength++ < 5 &&!("html" === (elm = normalTarget(t)));) {
+    ret.push(elm), t = t.parentNode;
+  }
+  return ret.reverse().join(" > ")
+}
+
 export function handleClick(event) {
+  // 正在圈选
+  if (GlobalVal.circle) {
+    let target = event.target
+    let clsArray = target.className.split(/\s+/)
+    let path = getElmPath(event.target)
+    // clsArray 为 ['bombayjs-circle-active] 或 ['', 'bombayjs-circle-active]时
+    if (clsArray.length === 1 || (clsArray.length === 2 && clsArray[0] === '')) {
+      path = path.replace(/\.\.bombayjs-circle-active/, '')
+    } else {
+      path = path.replace(/\.bombayjs-circle-active/, '')
+    }
+    window.parent.postMessage({
+      t: 'setElmPath',
+      path,
+      page: GlobalVal.page,
+    }, '*')
+    event.stopPropagation()
+    return
+  }
   var target;
   try {
     target = event.target
   } catch (u) {
     target = "<unknown>"
   }
+  if (target.nodeName === 'INPUT' || target.nodeName === 'TEXTAREA') return
+
   if (0 !== target.length) {
-    var behavior: clickBehavior = {
+    var behavior: eventBehavior = {
       type: 'ui.click',
       data: {
-        message: function (e) {
-          if (!e || 1 !== e.nodeType) return "";
-          for (var t = e || null, n = [], r = 0, a = 0,i = " > ".length, o = ""; t && r++ < 5 &&!("html" === (o = normalTarget(t)) || r > 1 && a + n.length * i + o.length >= 80);) 
-          n.push(o), a += o.length, t = t.parentNode;
-          return n.reverse().join(" > ")
-      }(target),
+        path: getElmPath(target),
+        message: '',
       }
     }
     // 空信息不上报
-    if (!behavior.data.message) return
+    if (!behavior.data.path) return
+    let commonMsg = getCommonMsg()
+    let msg: behaviorMsg = {
+      ...commonMsg,
+      ...{
+        t: 'behavior',
+        behavior,
+      }
+    }
+    report(msg)
+  }
+}
+
+export function handleBlur(event) {
+  var target;
+  try {
+    target = event.target
+  } catch (u) {
+    target = "<unknown>"
+  }
+  if (target.nodeName !== 'INPUT' && target.nodeName !== 'TEXTAREA') return
+
+  if (0 !== target.length) {
+    var behavior: eventBehavior = {
+      type: 'ui.blur',
+      data: {
+        path: getElmPath(target),
+        message: target.value
+      }
+    }
+    // 空信息不上报
+    if (!behavior.data.path || !behavior.data.message) return
     let commonMsg = getCommonMsg()
     let msg: behaviorMsg = {
       ...commonMsg,
@@ -158,9 +220,36 @@ export function handleHistorystatechange(e): void {
   page && setPage(page, false)
 }
 
+// 处理pv
+export function handleNavigation(page): void {
+  let commonMsg = getCommonMsg()
+  let msg: behaviorMsg = {
+    ...commonMsg,
+    ...{
+      t: 'behavior',
+      behavior: {
+        type: 'navigation',
+        data: {
+          from: commonMsg.page,
+          to: page,
+        },
+      }
+    }
+  }
+  report(msg)
+}
+
+
 export function setPage(page, isFirst?: boolean) {
   !isFirst && handleHealth()
+  handleNavigation(page)
   setTimeout(()=> {
+    if (isInIframe) {
+      window.parent.postMessage({
+        t: 'setPage',
+        page: location.href,
+      }, '*')
+    }
     setGlobalPage(page)
     setGlobalSid()
     handlePv()
@@ -240,7 +329,6 @@ function reportResourceError(error:any):void{
 
 // 捕获promise异常
 function reportPromiseError(error:any):void{
-  console.log(error)
   let commonMsg = getCommonMsg()
   let msg: ErrorMsg = {
     ...commonMsg,
@@ -285,7 +373,7 @@ export function handleResource() {
       dom: 0,
       load: 0,
       t: 'res',
-      res: '',
+      res: [],
     }
   }
   var i = performance.timing || {},
@@ -310,7 +398,7 @@ export function handleResource() {
     var include = getConfig('ignore').ignoreApis.findIndex(ignoreApi => item.name.indexOf(ignoreApi) > -1)
     return include > -1 ? false : true
   })
-  msg.res = JSON.stringify(o)
+  msg.res = o
   report(msg)
 }
 
@@ -396,3 +484,73 @@ export function handleMsg(key: string) {
 //   }
 //   report(ret)
 // }
+
+
+export function handleHover(e) {
+  var cls = document.getElementsByClassName(CIRCLECLS)
+  if (cls.length > 0) {
+    for (var i = 0; i < cls.length; i++) {
+      cls[i].className = cls[i].className.replace(/ bombayjs-circle-active/g, '')
+    }
+  }
+  e.target.className += ` ${CIRCLECLS}`
+}
+
+export function insertCss() {
+  var content = `.${CIRCLECLS}{border: #ff0000 2px solid;}`
+  var style = document.createElement("style");
+  style.type = "text/css";
+  style.id = CIRCLESTYLEID
+  try{
+  　　style.appendChild(document.createTextNode(content));
+  }catch(ex){
+  　　style.styleSheet.cssText = content;//针对IE
+  }
+  var head = document.getElementsByTagName("head")[0];
+  head.appendChild(style);
+}
+
+export function removeCss() {
+  var style = document.getElementById(CIRCLESTYLEID)
+  style.parentNode.removeChild(style)
+}
+
+export function listenCircleListener() {
+  insertCss()
+  GlobalVal.cssInserted = true
+  GlobalVal.circle = true
+  on('mouseover', handleHover);
+}
+
+export function removeCircleListener() {
+  removeCss()
+  GlobalVal.cssInserted = false
+  GlobalVal.circle = false
+  off('mouseover', handleHover);
+}
+
+export function listenMessageListener() {
+  on('message', handleMessage);
+}
+
+/**
+ *
+ * @param {*} event {t: '', v: ''}
+ *  t: type
+ *  v: value
+ */
+function handleMessage(event) {
+  // 防止其他message的干扰
+  if (!event.data || !event.data.t) return
+  if (event.data.t === 'setCircle') {
+    if (Boolean(event.data)) {
+      listenCircleListener()
+    } else {
+      removeCircleListener()
+    }
+  } else if (event.data.t === 'back') {
+    window.history.back()
+  } else if (event.data.t === 'forward') {
+    window.history.forward()
+  }
+}
